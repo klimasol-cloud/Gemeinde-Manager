@@ -153,6 +153,7 @@ tr:hover td { background: #F8FAFF; }
   .sidebar-footer { display: none; }
 }
 </style>
+<meta name="app-version" content="2026-08-14-reparatur-1">
 </head>
 <body>
 <div id="login-screen" style="position:fixed;inset:0;background:linear-gradient(135deg,#1A5276,#1E8449);display:flex;align-items:center;justify-content:center;z-index:9999;">
@@ -190,7 +191,7 @@ tr:hover td { background: #F8FAFF; }
     <div class="nav-item" onclick="showPage('predigten')"><span class="icon">📖</span> Predigten</div>
     <div class="nav-section">Kommunikation</div>
     <div class="nav-item" onclick="showPage('nachrichten')"><span class="icon">💬</span> Nachrichten</div>
-    <div class="nav-section">Finanzen</div>
+    <div class="nav-section" id="nav-finanz-section">Finanzen</div>
     <div class="nav-item" id="nav-kassenbuch" onclick="showPage('kassenbuch')"><span class="icon">💰</span> Kassenbuch</div>
   </nav>
   <div class="sync-indicator" id="sync-indicator">
@@ -206,6 +207,7 @@ tr:hover td { background: #F8FAFF; }
     <span class="topbar-badge" id="topbar-badge">EFGG Erkelenz</span>
     <span id="role-badge" style="font-size:11px;padding:3px 10px;border-radius:12px;font-weight:600;background:#EBF5FB;color:#1A5276"></span>
     <button class="btn btn-outline btn-sm" onclick="refreshPage()" title="Aktualisieren">🔄</button>
+    <button class="btn btn-outline btn-sm" onclick="logout()" title="Abmelden">Abmelden</button>
   </div>
   <div id="content"><div class="loading">⏳ Verbinde mit Supabase...</div></div>
 </div>
@@ -218,20 +220,54 @@ const SUPABASE_URL = 'https://qvzwxtkqhatsqwbeoekc.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InF2end4dGtxaGF0c3F3YmVvZWtjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA5OTQ0NjQsImV4cCI6MjA5NjU3MDQ2NH0.L0_7dwYZ2vee0gLDey5fUNmSwQu2deEYC6p4re3T9Sk';
 const HEADERS = { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', 'Prefer': 'return=representation' };
 
-async function sb(table, method='GET', body=null, query='') {
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>'"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
+}
+function sanitizeData(value) {
+  if (Array.isArray(value)) return value.map(sanitizeData);
+  if (value && typeof value === 'object') {
+    const out={}; Object.entries(value).forEach(([k,v])=>out[k]=(k==='link'&&typeof v==='string')?v:sanitizeData(v)); return out;
+  }
+  return typeof value === 'string' ? escapeHtml(value) : value;
+}
+function safeLink(value) {
+  try { const u=new URL(String(value||''), location.href); return ['http:','https:'].includes(u.protocol) ? escapeHtml(u.href) : ''; }
+  catch { return ''; }
+}
+let searchTimer=null;
+function scheduleSearch(renderer, value) {
+  clearTimeout(searchTimer);
+  const pos=document.activeElement?.selectionStart ?? value.length;
+  searchTimer=setTimeout(async()=>{
+    await renderer(value);
+    const input=document.querySelector('.search-row input');
+    if(input){ input.focus(); input.setSelectionRange(Math.min(pos,input.value.length),Math.min(pos,input.value.length)); }
+  },250);
+}
+
+
+async function sb(table, method='GET', body=null, query='', attempt=0) {
   setSyncing(true);
+  const controller=new AbortController();
+  const timeout=setTimeout(()=>controller.abort(),12000);
   try {
     const url = `${SUPABASE_URL}/rest/v1/${table}${query}`;
-    const opts = { method, headers: HEADERS };
+    const opts = { method, headers: HEADERS, signal:controller.signal };
     if (body) opts.body = JSON.stringify(body);
     const res = await fetch(url, opts);
     if (!res.ok) { const err = await res.text(); throw new Error(err); }
     const text = await res.text();
-    setSyncing(false); setConnected(true);
-    return text ? JSON.parse(text) : [];
+    clearTimeout(timeout); setSyncing(false); setConnected(true);
+    return text ? sanitizeData(JSON.parse(text)) : [];
   } catch(e) {
+    clearTimeout(timeout);
+    if(method==='GET' && attempt<1){ await new Promise(r=>setTimeout(r,1200)); return sb(table,method,body,query,attempt+1); }
     setSyncing(false); setConnected(false);
-    toast('⚠️ Fehler: ' + e.message);
+    const msg=e.name==='AbortError'?'Zeitüberschreitung. Bitte Verbindung prüfen und erneut versuchen.':e.message;
+    toast('⚠️ '+msg);
+    const content=document.getElementById('content');
+    if(content?.querySelector('.loading')) content.innerHTML=`<div class="empty-state"><div class="empty-icon">⚠️</div><p>Daten konnten nicht geladen werden.</p><button class="btn btn-primary" onclick="refreshPage()">Erneut versuchen</button></div>`;
     return null;
   }
 }
@@ -245,8 +281,10 @@ function setConnected(v) {
   txt.textContent = v ? 'Verbunden ✓' : 'Nicht verbunden';
 }
 
+
 let state = { gemeinde: 'erkelenz', page: 'dashboard', chatChannel: '#allgemein' };
 const pageTitles = { dashboard:'Dashboard', mitglieder:'Mitglieder', gruppen:'Gruppen', aufgaben:'Aufgaben', ablauf:'Ablaufplan', predigten:'Predigt-Archiv', nachrichten:'Nachrichten', kassenbuch:'Kassenbuch' };
+
 
 function switchGemeinde(g) {
   state.gemeinde = g;
@@ -259,7 +297,9 @@ function switchGemeinde(g) {
   showPage(state.page);
 }
 
+
 function showPage(page) {
+  if(state.chatTimer){clearTimeout(state.chatTimer);state.chatTimer=null;}
   state.page = page;
   document.getElementById('page-title').textContent = pageTitles[page]||page;
   document.querySelectorAll('.nav-item').forEach(el => el.classList.toggle('active',(el.getAttribute('onclick')||'').includes(`'${page}'`)));
@@ -269,6 +309,7 @@ function showPage(page) {
 }
 function refreshPage() { showPage(state.page); }
 
+
 async function updateBadges() {
   const m = await sb('mitglieder','GET',null,`?gemeinde=eq.${state.gemeinde}&aktiv=eq.true&select=id`);
   const a = await sb('aufgaben','GET',null,`?gemeinde=eq.${state.gemeinde}&status=neq.Erledigt&select=id`);
@@ -276,10 +317,11 @@ async function updateBadges() {
   if (a) document.getElementById('badge-aufgaben').textContent = a.length||'';
 }
 
+
 async function renderDashboard() {
   const g = state.gemeinde;
   const [mitg,auf,pred,grp,abl] = await Promise.all([
-    sb('mitglieder','GET',null,`?gemeinde=eq.${g}`),
+    sb('mitglieder','GET',null,`?gemeinde=eq.${g}&aktiv=eq.true`),
     sb('aufgaben','GET',null,`?gemeinde=eq.${g}&status=neq.Erledigt&order=faellig.asc`),
     sb('predigten','GET',null,`?gemeinde=eq.${g}&select=id`),
     sb('gruppen','GET',null,`?gemeinde=eq.${g}&select=id`),
@@ -305,12 +347,13 @@ async function renderDashboard() {
   updateBadges();
 }
 
+
 async function renderMitglieder(search='') {
-  const list = await sb('mitglieder','GET',null,`?gemeinde=eq.${state.gemeinde}&order=name.asc`);
+  const list = await sb('mitglieder','GET',null,`?gemeinde=eq.${state.gemeinde}&aktiv=eq.true&order=name.asc`);
   if (!list) return;
   let filtered = search ? list.filter(m=>`${m.vorname} ${m.name} ${m.rolle} ${m.gruppen||''}`.toLowerCase().includes(search.toLowerCase())) : list;
   let html = `<div class="section-header"><h2>Mitglieder (${filtered.length})</h2>${isAdmin()?'<button class="btn btn-primary" onclick="openMitgliedModal()">+ Neu</button>':''}</div>
-  <div class="search-row"><input type="text" placeholder="Suchen..." value="${search}" oninput="renderMitglieder(this.value)"></div>
+  <div class="search-row"><input type="text" placeholder="Suchen..." value="${escapeHtml(search)}" oninput="scheduleSearch(renderMitglieder,this.value)"></div>
   <div class="card"><table><thead><tr><th style="width:36px">#</th><th>Name</th><th>Status</th><th>Funktion</th><th>Gruppenverantwortlich</th><th>Mobil</th><th>Geburtstag</th><th></th></tr></thead><tbody>`;
   filtered.forEach((m,idx)=>{
     const sc=m.status==='Mitglied'?'role-pastor':m.status==='Freundeskreis'?'role-worship':'role-default';
@@ -328,6 +371,7 @@ async function renderMitglieder(search='') {
   html+=`</tbody></table></div>`;
   document.getElementById('content').innerHTML = html;
 }
+
 
 async function openMitgliedModal(id=null) {
   let v={vorname:'',name:'',status:'Mitglied',rolle:'',gruppen:'',gruppenverantwortlich:'',telefon:'',email:'',geburtstag:'',adresse:'',mitglied_seit:'',aktiv:true};
@@ -357,8 +401,9 @@ async function deleteMitglied(id) {
   if(res!==null){toast('Gelöscht');renderMitglieder();}
 }
 
+
 async function renderGruppen() {
-  const list=await sb('gruppen','GET',null,`?gemeinde=eq.${state.gemeinde}&order=name.asc`);
+  const list=await sb('gruppen','GET',null,`?gemeinde=eq.${state.gemeinde}&aktiv=eq.true&order=name.asc`);
   if(!list)return;
   let html=`<div class="section-header"><h2>Gruppen (${list.length})</h2>${isAdmin()?'<button class="btn btn-primary" onclick="openGruppeModal()">+ Neu</button>':''}</div>
   <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px">`;
@@ -395,12 +440,13 @@ async function deleteGruppe(id) {
   toast('Gelöscht');renderGruppen();
 }
 
+
 async function renderAufgaben(search='') {
   const list=await sb('aufgaben','GET',null,`?gemeinde=eq.${state.gemeinde}&order=faellig.asc`);
   if(!list)return;
   const filtered=search?list.filter(a=>`${a.aufgabe} ${a.person} ${a.gruppe||''}`.toLowerCase().includes(search.toLowerCase())):list;
   let html=`<div class="section-header"><h2>Aufgaben (${filtered.length})</h2>${isAdmin()?'<button class="btn btn-primary" onclick="openAufgabeModal()">+ Neu</button>':''}</div>
-  <div class="search-row"><input type="text" placeholder="Suchen..." value="${search}" oninput="renderAufgaben(this.value)"></div>
+  <div class="search-row"><input type="text" placeholder="Suchen..." value="${escapeHtml(search)}" oninput="scheduleSearch(renderAufgaben,this.value)"></div>
   <div class="card"><table><thead><tr><th>Aufgabe</th><th>Verantwortlich</th><th>Priorität</th><th>Fällig</th><th>Status</th><th></th></tr></thead><tbody>`;
   filtered.forEach(a=>{
     const sc=a.status==='Erledigt'?'status-done':a.status==='In Arbeit'?'status-progress':'status-open';
@@ -438,6 +484,7 @@ async function deleteAufgabe(id) {
   await sb('aufgaben','DELETE',null,`?id=eq.${id}`);
   toast('Gelöscht');renderAufgaben();
 }
+
 
 async function renderAblauf() {
   const list=await sb('ablauf','GET',null,`?gemeinde=eq.${state.gemeinde}&order=datum.asc,zeit.asc`);
@@ -484,16 +531,18 @@ async function exportAblauf(datum) {
   let txt=`Gottesdienst-Ablauf – ${datum}\nGemeinde: ${state.gemeinde==='erkelenz'?'EFGG Erkelenz':'Treffpunkt HOPE Laboe'}\n${'─'.repeat(50)}\n`;
   (items||[]).forEach(i=>{txt+=`${i.zeit}  ${i.punkt.padEnd(30)} ${i.person}  (${i.dauer} Min)\n`;});
   const a=document.createElement('a');
-  a.href=URL.createObjectURL(new Blob([txt],{type:'text/plain'}));
-  a.download=`Ablaufplan-${datum}.txt`;a.click();
+  const exportUrl=URL.createObjectURL(new Blob([txt],{type:'text/plain'}));
+  a.href=exportUrl; a.download=`Ablaufplan-${datum}.txt`; a.click();
+  setTimeout(()=>URL.revokeObjectURL(exportUrl),1000);
 }
+
 
 async function renderPredigten(search='') {
   const list=await sb('predigten','GET',null,`?gemeinde=eq.${state.gemeinde}&order=datum.desc`);
   if(!list)return;
   const filtered=search?list.filter(p=>`${p.titel} ${p.prediger} ${p.bibelstelle} ${p.serie||''} ${p.tags||''}`.toLowerCase().includes(search.toLowerCase())):list;
   let html=`<div class="section-header"><h2>Predigt-Archiv (${filtered.length})</h2>${isAdmin()?'<button class="btn btn-primary" onclick="openPredigtModal()">+ Neue Predigt</button>':''}</div>
-  <div class="search-row"><input type="text" placeholder="Titel, Bibelstelle, Schlagwort..." value="${search}" oninput="renderPredigten(this.value)"></div>
+  <div class="search-row"><input type="text" placeholder="Titel, Bibelstelle, Schlagwort..." value="${escapeHtml(search)}" oninput="scheduleSearch(renderPredigten,this.value)"></div>
   <div class="predigt-grid">`;
   filtered.forEach(p=>{
     html+=`<div class="predigt-card">
@@ -503,7 +552,7 @@ async function renderPredigten(search='') {
       <div>${p.serie?`<span class="predigt-series">${p.serie}</span>`:''}<span class="predigt-type">${p.typ||''}</span></div>
       ${p.prediger?`<div style="font-size:11px;color:var(--text2);margin-top:6px">🎤 ${p.prediger}</div>`:''}
       ${p.tags?`<div style="font-size:11px;color:var(--text2);margin-top:3px">🏷 ${p.tags}</div>`:''}
-      ${p.link?`<div style="margin-top:8px"><a href="${p.link}" target="_blank" style="color:var(--blue-light);font-size:12px">▶ Anhören</a></div>`:''}
+      ${safeLink(p.link)?`<div style="margin-top:8px"><a href="${safeLink(p.link)}" target="_blank" rel="noopener noreferrer" style="color:var(--blue-light);font-size:12px">▶ Anhören</a></div>`:''}
       ${isAdmin()?`<div style="margin-top:10px;display:flex;gap:6px"><button class="btn btn-sm btn-outline" onclick="openPredigtModal(${p.id})">✏️</button><button class="btn btn-sm btn-danger" onclick="deletePredigt(${p.id})">🗑</button></div>`:''}</div>`;
   });
   if(!filtered.length)html+=`<div class="empty-state"><div class="empty-icon">📖</div><p>Noch keine Predigten</p></div>`;
@@ -535,6 +584,7 @@ async function deletePredigt(id) {
   toast('Gelöscht');renderPredigten();
 }
 
+
 const channels=['#allgemein','#worship','#aufgaben','#seelsorge','#jugend','#technik','#gebete'];
 async function renderNachrichten() {
   const ch=state.chatChannel;
@@ -558,6 +608,7 @@ async function renderNachrichten() {
   document.getElementById('content').innerHTML=html;
   const msgs=document.getElementById('chat-msgs');
   if(msgs)msgs.scrollTop=msgs.scrollHeight;
+  state.chatTimer=setTimeout(()=>{if(state.page==='nachrichten')renderNachrichten();},15000);
 }
 async function switchChannel(ch){state.chatChannel=ch;renderNachrichten();}
 async function sendMessage() {
@@ -571,6 +622,7 @@ async function sendMessage() {
   if(res!==null)renderNachrichten();
 }
 
+
 const KASSE_KATEGORIEN=['Spende','Kollekte','Miete','Material','Technik','Musik','Reise','Sonstiges'];
 async function renderKassenbuch() {
   const list=await sb('kassenbuch','GET',null,`?gemeinde=eq.${state.gemeinde}&order=datum.asc`);
@@ -578,7 +630,7 @@ async function renderKassenbuch() {
   let totalEin=0,totalAus=0;
   list.forEach(e=>{totalEin+=parseFloat(e.einnahme||0);totalAus+=parseFloat(e.ausgabe||0);});
   const saldo=totalEin-totalAus;
-  const canEdit=userRole==='kasse';
+  const canEdit=userRole==='kasse'||userRole==='admin';
   let html=`<div class="section-header"><h2>Kassenbuch</h2>${canEdit?'<button class="btn btn-primary" onclick="openKasseModal()">+ Buchung</button>':''}</div>
   <div class="stats-grid" style="margin-bottom:16px">
     <div class="stat-card"><div style="font-size:18px;margin-bottom:4px">📥</div><div class="stat-num" style="color:var(--green)">+${totalEin.toFixed(2)} €</div><div class="stat-label">Einnahmen</div></div>
@@ -629,17 +681,20 @@ async function deleteKasse(id) {
   toast('Gelöscht');renderKassenbuch();
 }
 
+
 function toggleSidebar(){document.getElementById('sidebar').classList.toggle('open');document.getElementById('sidebar-overlay').classList.toggle('open');}
 function closeSidebar(){document.getElementById('sidebar').classList.remove('open');document.getElementById('sidebar-overlay').classList.remove('open');}
 document.addEventListener('DOMContentLoaded',()=>{
   document.querySelectorAll('.nav-item').forEach(el=>{el.addEventListener('click',()=>{if(window.innerWidth<=768)closeSidebar();});});
 });
 
+
 function val(id){const el=document.getElementById(id);return el?el.value:'';}
 function showModal(html){document.getElementById('modal-box').innerHTML=html;document.getElementById('modal-overlay').style.display='flex';}
 function closeModal(){document.getElementById('modal-overlay').style.display='none';}
 function closeModalOnOverlay(e){if(e.target===document.getElementById('modal-overlay'))closeModal();}
 function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2500);}
+
 
 const PASSWORDS={
   'erkelenz2026':      {rolle:'viewer',gemeinde:'erkelenz'},
@@ -648,14 +703,18 @@ const PASSWORDS={
   'admin-laboe2026':   {rolle:'admin', gemeinde:'laboe'},
   'chor2026':          {rolle:'viewer',gemeinde:'gospelchor'},
   'admin-chor2026':    {rolle:'admin', gemeinde:'gospelchor'},
+  'kasse-erkelenz2026':{rolle:'kasse', gemeinde:'erkelenz'},
   'kasse-laboe2026':   {rolle:'kasse', gemeinde:'laboe'},
+  'kasse-chor2026':    {rolle:'kasse', gemeinde:'gospelchor'},
 };
 let userRole=null,userGemeinde=null,userName='Anonym';
+
 
 function doLogin(){
   const pw=document.getElementById('login-pw').value;
   const match=PASSWORDS[pw];
   const name=document.getElementById('login-name').value.trim();
+  if(match && !name){const err=document.getElementById('login-error');err.textContent='Bitte Namen eingeben';err.style.display='block';return;}
   if(match){
     userRole=match.rolle;userGemeinde=match.gemeinde;userName=name||'Anonym';
     document.getElementById('login-screen').style.display='none';
@@ -664,8 +723,9 @@ function doLogin(){
     document.getElementById('role-badge').style.background=isAdm?'#E8F8F5':isKasse?'#FEF9E7':'#EBF5FB';
     document.getElementById('role-badge').style.color=isAdm?'#1E8449':isKasse?'#B7950B':'#1A5276';
     ['erkelenz','laboe','gospelchor'].forEach(g=>{const btn=document.getElementById('gbtn-'+g);if(btn)btn.style.display=(g===match.gemeinde)?'':'none';});
-    document.getElementById('nav-kassenbuch').style.display=isKasse?'':'none';
-    document.querySelectorAll('.nav-item:not(#nav-kassenbuch), .nav-section').forEach(el=>{el.style.display=isKasse?'none':'';});
+    document.getElementById('nav-kassenbuch').style.display=(isKasse||isAdm)?'':'none';
+    document.getElementById('nav-finanz-section').style.display=(isKasse||isAdm)?'':'none';
+    document.querySelectorAll('.nav-item:not(#nav-kassenbuch), .nav-section:not(#nav-finanz-section)').forEach(el=>{el.style.display='';});
     switchGemeinde(match.gemeinde);
     if(isKasse)showPage('kassenbuch');
   } else {
@@ -674,6 +734,12 @@ function doLogin(){
     document.getElementById('login-pw').value='';
     setTimeout(()=>err.style.display='none',3000);
   }
+}
+function logout(){
+  if(state.chatTimer){clearTimeout(state.chatTimer);state.chatTimer=null;}
+  userRole=null;userGemeinde=null;userName='Anonym';
+  document.getElementById('login-pw').value='';
+  document.getElementById('login-screen').style.display='flex';
 }
 function isAdmin(){return userRole==='admin';}
 </script>
