@@ -153,7 +153,7 @@ tr:hover td { background: #F8FAFF; }
   .sidebar-footer { display: none; }
 }
 </style>
-<meta name="app-version" content="2026-08-14-reparatur-1">
+<meta name="app-version" content="2026-08-14-reparatur-2-superadmin">
 </head>
 <body>
 <div id="login-screen" style="position:fixed;inset:0;background:linear-gradient(135deg,#1A5276,#1E8449);display:flex;align-items:center;justify-content:center;z-index:9999;">
@@ -697,6 +697,7 @@ function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t
 
 
 const PASSWORDS={
+  'superadmin2026':    {rolle:'superadmin',gemeinde:'erkelenz'},
   'erkelenz2026':      {rolle:'viewer',gemeinde:'erkelenz'},
   'admin-erkelenz2026':{rolle:'admin', gemeinde:'erkelenz'},
   'laboe2026':         {rolle:'viewer',gemeinde:'laboe'},
@@ -718,11 +719,11 @@ function doLogin(){
   if(match){
     userRole=match.rolle;userGemeinde=match.gemeinde;userName=name||'Anonym';
     document.getElementById('login-screen').style.display='none';
-    const isAdm=match.rolle==='admin',isKasse=match.rolle==='kasse';
-    document.getElementById('role-badge').textContent=isAdm?'🔑 Admin':isKasse?'💰 Kasse':'👁 Mitglied';
-    document.getElementById('role-badge').style.background=isAdm?'#E8F8F5':isKasse?'#FEF9E7':'#EBF5FB';
-    document.getElementById('role-badge').style.color=isAdm?'#1E8449':isKasse?'#B7950B':'#1A5276';
-    ['erkelenz','laboe','gospelchor'].forEach(g=>{const btn=document.getElementById('gbtn-'+g);if(btn)btn.style.display=(g===match.gemeinde)?'':'none';});
+    const isSuper=match.rolle==='superadmin',isAdm=match.rolle==='admin'||isSuper,isKasse=match.rolle==='kasse';
+    document.getElementById('role-badge').textContent=isSuper?'⭐ Superadmin':isAdm?'🔑 Admin':isKasse?'💰 Kasse':'👁 Mitglied';
+    document.getElementById('role-badge').style.background=isSuper?'#F4ECF7':isAdm?'#E8F8F5':isKasse?'#FEF9E7':'#EBF5FB';
+    document.getElementById('role-badge').style.color=isSuper?'#6C3483':isAdm?'#1E8449':isKasse?'#B7950B':'#1A5276';
+    ['erkelenz','laboe','gospelchor'].forEach(g=>{const btn=document.getElementById('gbtn-'+g);if(btn)btn.style.display=(isSuper||g===match.gemeinde)?'':'none';});
     document.getElementById('nav-kassenbuch').style.display=(isKasse||isAdm)?'':'none';
     document.getElementById('nav-finanz-section').style.display=(isKasse||isAdm)?'':'none';
     document.querySelectorAll('.nav-item:not(#nav-kassenbuch), .nav-section:not(#nav-finanz-section)').forEach(el=>{el.style.display='';});
@@ -741,7 +742,7 @@ function logout(){
   document.getElementById('login-pw').value='';
   document.getElementById('login-screen').style.display='flex';
 }
-function isAdmin(){return userRole==='admin';}
+function isAdmin(){return userRole==='admin'||userRole==='superadmin';}
 </script>
 </body>
 </html>
